@@ -45,6 +45,7 @@ static mut curcmdList: u32 = 0;
 static mut srvBaseOffset: u32 = 0;
 static mut cmdQue: Option<CommandQueue> = None;
 static mut globalEvent: Option<Event> = None;
+static mut globalTextures: Option<HashMap<String,Resource>> = None;
 const maxRegisterSpaces: u32 = 3;
 unsafe fn get_cmdList() -> (Arc<GraphicsCommandList>,Vec<ResourceState>) {
     let ret = cmdLists[curcmdList as usize].clone();
@@ -438,7 +439,7 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
     let mut device = Device::from_raw(graphicinter.device().cast());
     let mut hr = device.create_command_allocator(CmdListType::Direct);
     if hr.0.is_null() {
-        panic!("Failed to create command allocator! {:x}",hr.1);
+        panic!("Failed to create command allocator! {:x}", hr.1);
     }
     let _ = cmdAlloc.insert(hr.0);
     for _ in 0..3 {
@@ -582,6 +583,9 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
             }
         }
     }
+    if globalTextures.is_none() {
+        *(&mut globalTextures) = Some(HashMap::new());
+    }
 }
 #[no_mangle]
 unsafe extern "C" fn SetBool(shader_name: *const c_char,param_name: *const c_char,val: c_int) {
@@ -619,6 +623,21 @@ unsafe extern "C" fn SetFloat(shader_name: *const c_char,param_name: *const c_ch
 #[no_mangle]
 unsafe extern "C" fn SetTexture(kernel_name: *const c_char,param_name: *const c_char,val: *mut c_void) {
     let res = Resource::from_raw(val.cast());
+    let mut kernel = &mut kernels.as_mut().unwrap().get_mut(CStr::from_ptr(kernel_name).to_str().expect("Failed to convert kernel name to str")).unwrap();
+    kernel.SetTexture(CStr::from_ptr(param_name).to_str().unwrap().to_string(),res);
+}
+#[no_mangle]
+unsafe extern "C" fn SetGlobalTexture(name: *const c_char,val: *mut c_void) {
+    let res = Resource::from_raw(val.cast());
+    let mut globs = globalTextures.as_mut().unwrap();
+    if globs.contains_key(CStr::from_ptr(name).to_str().expect("Failed to convert name to str")) {
+        panic!("Can't have duplicate global texture names!");
+    }
+    globs.insert(CStr::from_ptr(name).to_str().expect("Failed to convert name to str").to_string(),res);
+}
+#[no_mangle]
+unsafe extern "C" fn SetTextureFromGlobal(glob_name: *const c_char,kernel_name: *const c_char,param_name: *const c_char) {
+    let res = globalTextures.as_mut().unwrap()[CStr::from_ptr(glob_name).to_str().expect("Failed to convert glob name to str")].clone();
     let mut kernel = &mut kernels.as_mut().unwrap().get_mut(CStr::from_ptr(kernel_name).to_str().expect("Failed to convert kernel name to str")).unwrap();
     kernel.SetTexture(CStr::from_ptr(param_name).to_str().unwrap().to_string(),res);
 }
@@ -662,7 +681,15 @@ unsafe extern "system" fn KernelDispatch(kernel_name: *const c_char,x: c_int, y:
     let mut tuple = get_cmdList();
     let cmdList = &*tuple.0;
     let states = &mut tuple.1;
-    kernel.Dispatch(cmdList,states,x as u32,y as u32,z as u32);
+    kernel.Dispatch(cmdList,states,x as u32,y as u32,z as u32,false,ptr::null_mut(),0);
+}
+#[no_mangle]
+unsafe extern "system" fn KernelDispatchIndirect(kernel_name: *const c_char,arg_buf: *mut c_void,arg_off: c_int) {
+    let mut kernel = &mut kernels.as_mut().unwrap().get_mut(CStr::from_ptr(kernel_name).to_str().expect("Failed to convert kernel name to str")).unwrap();
+    let mut tuple = get_cmdList();
+    let cmdList = &*tuple.0;
+    let states = &mut tuple.1;
+    kernel.Dispatch(cmdList, states, 0, 0, 0, true, arg_buf.cast(), arg_off as u32);
 }
 #[no_mangle]
 unsafe extern "system" fn WaitForEvent() {

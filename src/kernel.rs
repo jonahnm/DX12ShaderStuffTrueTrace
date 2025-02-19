@@ -3,7 +3,7 @@ use std::{mem, ptr};
 use std::ffi::c_int;
 use std::ops::{Deref, Range};
 use std::os::windows::raw::HANDLE;
-use d3d12::{CommandList, CpuDescriptor, DescriptorHeap, DescriptorHeapFlags, DescriptorHeapType, Device, Event, Fence, GpuAddress, GraphicsCommandList, PipelineState, Resource, RootParameter, RootSignature};
+use d3d12::{CommandList, CommandSignature, CpuDescriptor, DescriptorHeap, DescriptorHeapFlags, DescriptorHeapType, Device, Event, Fence, GpuAddress, GraphicsCommandList, IndirectArgument, NodeMask, PipelineState, Resource, RootParameter, RootSignature};
 use serde_json::Value;
 use unity_native_plugin::d3d12::{ResourceState, UnityGraphicsD3D12v5};
 use unity_native_plugin::interface::UnityInterface;
@@ -30,7 +30,7 @@ pub struct kernel<'a> {
     pub cbuffer: &'a mut Vec<u8>,
 }
 impl<'a> kernel<'a> {
-    pub unsafe fn Dispatch(&self,cmdList: &GraphicsCommandList,states: &mut Vec<ResourceState>,x: u32,y: u32,z: u32) {
+    pub unsafe fn Dispatch(&self,cmdList: &GraphicsCommandList,states: &mut Vec<ResourceState>,x: u32,y: u32,z: u32,is_indirect: bool,indirect_argbuf: *mut c_void, indirect_argoff: u32) {
         cmdList.reset(cmdAlloc.as_ref().unwrap(),PipelineState::null());
         states.clear();
         cmdList.set_compute_root_signature(&self.rootSig);
@@ -92,7 +92,7 @@ impl<'a> kernel<'a> {
        // cmdList.set_compute_root_constant_buffer_view(self.nameToIndices["$Globals"],gpudesc.ptr);
         if self.textures.is_some() {
             println!("Textures is some!");
-            for (name,tex) in self.textures.as_ref().unwrap().iter() {
+            for (name, tex) in self.textures.as_ref().unwrap().iter() {
                 let offset = self.nameToSRVUAVCBVtableOffset[name];
                 let mut union = mem::zeroed::<D3D12_SHADER_RESOURCE_VIEW_DESC_u>();
                 let tex2d = union.Texture2D_mut();
@@ -109,7 +109,7 @@ impl<'a> kernel<'a> {
                     u: union,
                 };
                 cpudesc.ptr = basePtr + (offset * individualIncrement) as usize;
-                device.CreateShaderResourceView(tex.as_mut_ptr(),&srv_desc,cpudesc);
+                device.CreateShaderResourceView(tex.as_mut_ptr(), &srv_desc, cpudesc);
             }
         }
         for (name,(res,stride,size)) in self.buffers.iter() {
@@ -162,7 +162,12 @@ impl<'a> kernel<'a> {
         }
         cmdList.set_descriptor_heaps([DescriptorHeap::from_raw(unityDescHeap.as_ref().unwrap().as_mut_ptr())].as_slice());
         cmdList.set_compute_root_descriptor_table(0,unityDescHeap.as_ref().unwrap().start_gpu_descriptor());
-        cmdList.Dispatch(x,y,z);
+        if !is_indirect {
+            cmdList.Dispatch(x, y, z);
+        } else {
+            let sig = device.create_command_signature(RootSignature::null(),&[IndirectArgument::dispatch()],(size_of::<u32>() * 3) as u32,NodeMask::default()).0;
+            cmdList.ExecuteIndirect(sig.as_mut_ptr(),1,indirect_argbuf.cast(),indirect_argoff as u64,ptr::null_mut(),0);
+        }
         cmdList.close();
         /*
         let event = Event::create(false,false);
