@@ -27,7 +27,7 @@ pub struct kernel<'a> {
     pub buffers: HashMap<String, (Resource, u32, u32)>,
     pub offsetToUAVorSRV: HashMap<u32,bool>,
     pub nameToSRVUAVCBVtableOffset: &'a mut HashMap<String, u32>,
-    pub cbuffer: &'a mut Vec<u8>,
+    pub cbuffer: &'a (*mut u8,usize),
 }
 impl<'a> kernel<'a> {
     pub unsafe fn Dispatch(&self,cmdList: &GraphicsCommandList,states: &mut Vec<ResourceState>,x: u32,y: u32,z: u32,is_indirect: bool,indirect_argbuf: *mut c_void, indirect_argoff: u32) {
@@ -39,7 +39,7 @@ impl<'a> kernel<'a> {
         let mut constantBuffer = Resource::null();
         let cbDesc =  D3D12_RESOURCE_DESC {
             Dimension:  D3D12_RESOURCE_DIMENSION_BUFFER,
-            Width: self.cbuffer.len() as u64,
+            Width: self.cbuffer.1 as u64,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -59,6 +59,7 @@ impl<'a> kernel<'a> {
             CreationNodeMask: 1,
             VisibleNodeMask: 1,
         };
+        println!("Cbuf size: {}",self.cbuffer.1);
         let hr = device.CreateCommittedResource(&heapProps,D3D12_HEAP_FLAG_NONE,&cbDesc,D3D12_RESOURCE_STATE_GENERIC_READ,ptr::null_mut(),&ID3D12Resource::uuidof(),constantBuffer.mut_void());
         if hr != S_OK  {
             panic!("Failed to create constant buffer! {:#x}",hr);
@@ -74,14 +75,14 @@ impl<'a> kernel<'a> {
         if mappedData.0.is_null() {
             panic!("Failed to map constant buffer! {}",mappedData.1);
         }
-        ptr::copy_nonoverlapping(self.cbuffer.as_ptr(),mappedData.0.cast(),self.cbuffer.len());
+        ptr::copy_nonoverlapping(self.cbuffer.0,mappedData.0.cast(),self.cbuffer.1);
         constantBuffer.unmap(0,Some(Range {
             start: 0,
             end: 0
         }));
         let cbv_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: constantBuffer.gpu_virtual_address(),
-            SizeInBytes: self.cbuffer.len() as UINT,
+            SizeInBytes: self.cbuffer.1 as UINT,
         };
         let mut cpudesc = unityDescHeap.as_ref().expect("Unity Descriptor heap should exist at this point!").start_cpu_descriptor();
         let individualIncrement = device.get_descriptor_increment_size(DescriptorHeapType::CbvSrvUav);
@@ -189,56 +190,10 @@ impl<'a> kernel<'a> {
         fence.set_event_on_completion(globalEvent.unwrap(), waitforval as u64);
       //  println!("Execution Finished!");
     }
-    pub fn SetBool(&mut self, name: String, value: bool) {
-        let offset = self.nameToOffset[&name];
-        let value_bytes = (value as u32).to_le_bytes();
-        for i in 0..value_bytes.len() {
-            self.cbuffer[offset as usize + i] = value_bytes[i];
-        }
-    }
-    pub fn SetFloat(&mut self, name: String, value: f32) {
-        let offset = self.nameToOffset[&name];
-        let value_bytes = value.to_le_bytes();
-        for i in 0..value_bytes.len() {
-            self.cbuffer[offset as usize + i] = value_bytes[i];
-        }
-    }
-    pub fn SetInt(&mut self, name: String, value: i32) {
-        let offset = self.nameToOffset[&name];
-        let value_bytes = value.to_le_bytes();
-        for i in 0..value_bytes.len() {
-            self.cbuffer[offset as usize + i] = value_bytes[i];
-        }
-    }
     pub fn SetTexture(&mut self, name: String, texture: Resource) {
         self.textures.as_mut().unwrap().insert(name,texture);
     }
     pub fn SetBuffer(&mut self,name: String, buffer: Resource,stride:u32,size:u32) {
-        self.buffers.insert(name,(buffer,stride,size));
-    }
-
-    pub fn SetVector(&mut self, name: String, x: f32, y: f32, z: f32, e: f32) {
-        let offset = self.nameToOffset[&name];
-        let x_bytes = x.to_le_bytes();
-        let y_bytes = y.to_le_bytes();
-        let z_bytes = z.to_le_bytes();
-        let e_bytes = e.to_le_bytes();
-        let mut curOffset = offset as usize;
-        for i in 0..x_bytes.len() {
-            self.cbuffer[curOffset] = x_bytes[i];
-            curOffset += 1;
-        }
-        for i in 0..y_bytes.len() {
-            self.cbuffer[curOffset] = y_bytes[i];
-            curOffset += 1;
-        }
-        for i in 0..z_bytes.len() {
-            self.cbuffer[curOffset] = z_bytes[i];
-            curOffset += 1;
-        }
-        for i in 0..e_bytes.len() {
-            self.cbuffer[curOffset] = e_bytes[i];
-            curOffset += 1;
-        }
+        self.buffers.insert(name, (buffer, stride, size));
     }
 }

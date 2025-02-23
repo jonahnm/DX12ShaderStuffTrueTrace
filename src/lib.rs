@@ -2,6 +2,7 @@ mod kernel;
 
 use std::ffi::{c_char, c_float, c_int, c_void, CStr, CString};
 use std::{iter, mem, ptr};
+use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -33,7 +34,7 @@ use winapi::um::d3dcommon::*;
 static mut globalinterfaces: Option<&'static mut UnityInterfaces> = None;
 static mut logger: Option<UnityLog> = None;
 //#[dynamic]
-static mut shadernametocbuf: Option<HashMap<String,Vec<u8>>> = None;
+static mut shadernametocbuf: Option<HashMap<String,(*mut u8,usize)>> = None;
 static mut shadernametocbufoffsets: Option<HashMap<String,HashMap<String,u32>>> = None;
 static mut kernels: Option<&'static mut HashMap<String,&'static mut kernel::kernel<'static>>> = None;
 //#[dynamic]
@@ -66,12 +67,12 @@ extern "system" fn CreateDescriptorHeap_detour(dev: *mut ID3D12Device,desc: *con
         if usabledesc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV {
             println!("NOICE");
             if usabledesc.NumDescriptors >= 262144u32 {
-                if usabledesc.NumDescriptors + (4096 * 2) > 1000000u32 {
+                if usabledesc.NumDescriptors + (4096 * 2) >= 1000000u32 {
                     usabledesc.NumDescriptors = 1000000u32;
                     *(&mut srvBaseOffset) = (usabledesc.NumDescriptors - 65537) - (4096 * 2);
                 } else {
                     usabledesc.NumDescriptors = 1000000u32;
-                    *(&mut srvBaseOffset) = usabledesc.NumDescriptors - (4096 * 2);
+                    *(&mut srvBaseOffset) = usabledesc.NumDescriptors;
                 }
             } else {
                 *(&mut srvBaseOffset) = usabledesc.NumDescriptors;
@@ -517,9 +518,6 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                     texs = Some(&variant["m_Textures"]);
                     for tex in variant["m_Textures"].as_array().expect("m_Textures is not an array").iter() {
                         let mut count = 1;
-                        if tex["m_Name"].as_str().expect("m_Name is not a string") == "_BindlessTextures" {
-                            count = 2048;
-                        }
                         let descriptorrange = DescriptorRange::new(DescriptorRangeType::SRV, count, Binding { space: 0, register: tex["m_BindPoint"].as_u64().unwrap() as u32 }, curoffset);
                         cbvsrvuavdescRanges.push(descriptorrange);
                         nametooffsetscbvsrvuav.insert(String::from(tex["m_Name"].as_str().expect("m_Name is not a string")), curoffset - srvBaseOffset);
@@ -578,8 +576,8 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                 }
                 println!("Inserting {}", kernel["m_Name"].as_str().expect("m_Name is not a string"));
                 println!("Byte size: {}", cbuf["m_ByteSize"].as_u64().unwrap() as usize);
-                let mut desired_cbuf = vec![0;cbuf["m_ByteSize"].as_u64().unwrap() as usize];
-                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), desired_cbuf);
+                let mut desired_cbuf = alloc(Layout::from_size_align(cbuf["m_ByteSize"].as_u64().unwrap() as usize,align_of::<u8>()).unwrap());
+                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), (desired_cbuf,cbuf["m_ByteSize"].as_u64().unwrap() as usize));
                 shadernametocbufoffsets.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), nametooffsetscbvsrvuav);
             }
             kernels.as_mut().unwrap().insert(kernel["m_Name"].as_str().unwrap().to_string(), Box::leak(Box::new(kernel::kernel {
@@ -604,7 +602,7 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
 }
 #[no_mangle]
 unsafe extern "C" fn SetBool(shader_name: *const c_char,param_name: *const c_char,val: c_int) {
-    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
+    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap().0;
     let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
     if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
         println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
@@ -614,12 +612,12 @@ unsafe extern "C" fn SetBool(shader_name: *const c_char,param_name: *const c_cha
     let value = val as u32;
     let value_bytes = value.to_le_bytes();
     for i in 0..value_bytes.len() {
-        cbuf[offset as usize + i] = value_bytes[i];
+        *cbuf.offset(offset as isize + i as isize) = value_bytes[i];
     }
 }
 #[no_mangle]
 unsafe extern "C" fn SetInt(shader_name: *const c_char,param_name: *const c_char,val: c_int) {
-    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
+    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap().0;
     let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
     if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
         println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
@@ -629,12 +627,12 @@ unsafe extern "C" fn SetInt(shader_name: *const c_char,param_name: *const c_char
     let value = val as i32;
     let value_bytes = value.to_le_bytes();
     for i in 0..value_bytes.len() {
-        cbuf[offset as usize + i] = value_bytes[i];
+        *cbuf.offset((offset as usize + i) as isize) = value_bytes[i];
     }
 }
 #[no_mangle]
 unsafe extern "C" fn SetFloat(shader_name: *const c_char,param_name: *const c_char,val: c_float) {
-    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
+    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap().0;
     let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
     if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
         println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
@@ -644,7 +642,7 @@ unsafe extern "C" fn SetFloat(shader_name: *const c_char,param_name: *const c_ch
     let value = val as f32;
     let value_bytes = value.to_le_bytes();
     for i in 0..value_bytes.len() {
-        cbuf[offset as usize + i] = value_bytes[i];
+        *cbuf.offset((offset as usize + i) as isize) = value_bytes[i];
     }
 }
 #[no_mangle]
@@ -678,7 +676,7 @@ unsafe extern "C" fn SetBuffer(kernel_name: *const c_char,param_name: *const c_c
 #[no_mangle]
 unsafe extern "C" fn SetVector(shader_name: *const c_char,param_name: *const c_char,x: c_float,y: c_float,z:c_float,e:c_float) {
     println!("Set Vector! Param_name: {} Shader_name: {}",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
-    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
+    let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap().0;
     let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
     if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
         println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
@@ -689,21 +687,21 @@ unsafe extern "C" fn SetVector(shader_name: *const c_char,param_name: *const c_c
     let y_bytes = y.to_le_bytes();
     let z_bytes = z.to_le_bytes();
     let e_bytes = e.to_le_bytes();
-    let mut curOffset = offset as usize;
+    let mut curOffset = offset as isize;
     for i in 0..x_bytes.len() {
-        cbuf[curOffset] = x_bytes[i];
+        *cbuf.offset(curOffset) = x_bytes[i];
         curOffset += 1;
     }
     for i in 0..y_bytes.len() {
-        cbuf[curOffset] = y_bytes[i];
+        *cbuf.offset(curOffset) = y_bytes[i];
         curOffset += 1;
     }
     for i in 0..z_bytes.len() {
-        cbuf[curOffset] = z_bytes[i];
+        *cbuf.offset(curOffset) = z_bytes[i];
         curOffset += 1;
     }
     for i in 0..e_bytes.len() {
-        cbuf[curOffset] = e_bytes[i];
+        *cbuf.offset(curOffset) = e_bytes[i];
         curOffset += 1;
     }
 }
