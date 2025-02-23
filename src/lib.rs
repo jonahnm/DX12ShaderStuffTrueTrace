@@ -61,14 +61,17 @@ static mut OG_CREATEDESCRIPTORHEAP: Option<CreateDescriptorHeapTyp> = None;
 extern "system" fn CreateDescriptorHeap_detour(dev: *mut ID3D12Device,desc: *const D3D12_DESCRIPTOR_HEAP_DESC,iid: REFGUID,out: *mut *mut winapi::ctypes::c_void) -> HRESULT {
     unsafe {
         let mut usabledesc = *desc;
-       // println!("DETOUR!");
+        println!("DETOUR!");
         let mut usedescheap = false;
         if usabledesc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV {
-         //   println!("NOICE");
+            println!("NOICE");
             if usabledesc.NumDescriptors >= 262144u32 {
                 if usabledesc.NumDescriptors + (4096 * 2) > 1000000u32 {
                     usabledesc.NumDescriptors = 1000000u32;
                     *(&mut srvBaseOffset) = (usabledesc.NumDescriptors - 65537) - (4096 * 2);
+                } else {
+                    usabledesc.NumDescriptors = 1000000u32;
+                    *(&mut srvBaseOffset) = usabledesc.NumDescriptors - (4096 * 2);
                 }
             } else {
                 *(&mut srvBaseOffset) = usabledesc.NumDescriptors;
@@ -76,12 +79,12 @@ extern "system" fn CreateDescriptorHeap_detour(dev: *mut ID3D12Device,desc: *con
             }
             usedescheap = true;
         }
-       // println!("Calling original!");
+        println!("Calling original!");
         let res = OG_CREATEDESCRIPTORHEAP.unwrap()(dev,&usabledesc,iid,out);
         if usedescheap {
             *(&mut unityDescHeap) = Some(DescriptorHeap::from_raw(*out as *mut _));
         }
-       // println!("Copying 0xCC back into!");
+        println!("Copying 0xCC back into!");
         let thing = [0xCCu32];
         let mut old_protect: PAGE_PROTECTION_FLAGS = Default::default();
         if VirtualProtect(
@@ -104,9 +107,10 @@ extern "system" fn CreateDescriptorHeap_detour(dev: *mut ID3D12Device,desc: *con
             old_protect,
             &mut old_protect,
         );
-    //    println!("Copied!");
-       // println!("Res: {:#x}",res);
-       // println!("Desc heap addr: {:#x}",*out as usize);
+        println!("Copied!");
+        println!("Res: {:#x}",res);
+        println!("Desc heap addr: {:#x}",*out as usize);
+        println!("Srv base offset: {:#x}",srvBaseOffset);
         res
     }
 }
@@ -125,6 +129,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Memory::{VirtualProtect, VirtualQuery, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxA, MESSAGEBOX_STYLE, MB_OK};
+use log::warn;
+
 static mut ORIGINAL_MESSAGEBOXA: Option<MessageBoxAFn> = None;
 static mut DETOUR_ADDRESS: usize = 0;
 static mut VEH_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -144,7 +150,7 @@ unsafe extern "system" fn vectored_exception_handler(
         // 2. Check if the exception occurred within the first few bytes of the target function
         if exception_address == OG_CREATEDESCRIPTORHEAP.unwrap() as *mut _
         {
-          //  println!("Exception at The func! Redirecting to detour...");
+            println!("Exception at The func! Redirecting to detour...");
             // 3. Modify the instruction pointer to jump to the detour function
             let rip = CreateDescriptorHeap_detour as usize;
             (*(*exception_info).ContextRecord).Rip = rip as u64;
@@ -481,44 +487,55 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                 }
                 let mut curoffset = srvBaseOffset;
                 for sampler in variant["m_BuiltinSamplers"].as_array().expect("m_BuiltinSamplers is not an array").iter() {
-                    let descRange = DescriptorRange::new(DescriptorRangeType::Sampler, 1, Binding { space: 0, register: sampler["m_BindPoint"].as_i64().unwrap() as u32 }, 0);
+                    let descRange = DescriptorRange::new(DescriptorRangeType::Sampler, 1, Binding { space: 0, register: sampler["m_BindPoint"].as_i64().unwrap() as u32 }, curoffset);
                     samplerdescRanges.push(descRange);
+                    curoffset += 1;
                 }
 
                 for cb in variant["m_Cbs"].as_array().expect("m_Cbs is not an array").iter() {
-                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::CBV, 1, Binding { space: 0, register: cb["m_BindPoint"].as_u64().unwrap() as u32 },curoffset);
+                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::CBV, 1, Binding { space: 0, register: cb["m_BindPoint"].as_u64().unwrap() as u32 }, curoffset);
                     cbvsrvuavdescRanges.push(descriptorrange);
                     nametooffsetscbvsrvuav.insert(String::from(cb["m_Name"].as_str().expect("m_Name is not a string")), curoffset - srvBaseOffset);
                     curoffset += 1;
                 }
                 for inBuf in variant["m_InBuffers"].as_array().expect("m_InBuffers is not an array").iter() {
-                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::SRV, 1,Binding { space: 0, register: inBuf["m_BindPoint"].as_u64().unwrap() as u32 },curoffset);
+                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::SRV, 1, Binding { space: 0, register: inBuf["m_BindPoint"].as_u64().unwrap() as u32 }, curoffset);
                     cbvsrvuavdescRanges.push(descriptorrange);
                     nametooffsetscbvsrvuav.insert(String::from(inBuf["m_Name"].as_str().expect("m_Name is not a string")), curoffset - srvBaseOffset);
-                    uavorsrv.insert(curoffset - srvBaseOffset,false);
+                    uavorsrv.insert(curoffset - srvBaseOffset, false);
                     curoffset += 1;
                 }
                 for outBuf in variant["m_OutBuffers"].as_array().expect("m_OutBuffers is not an array").iter() {
-                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::UAV, 1,Binding { space: 0, register: outBuf["m_BindPoint"].as_u64().unwrap() as u32 },curoffset);
+                    let descriptorrange = DescriptorRange::new(DescriptorRangeType::UAV, 1, Binding { space: 0, register: outBuf["m_BindPoint"].as_u64().unwrap() as u32 }, curoffset);
                     cbvsrvuavdescRanges.push(descriptorrange);
                     nametooffsetscbvsrvuav.insert(String::from(outBuf["m_Name"].as_str().expect("m_Name is not a string")), curoffset - srvBaseOffset);
-                    uavorsrv.insert(curoffset - srvBaseOffset,true);
+                    uavorsrv.insert(curoffset - srvBaseOffset, true);
                     curoffset += 1;
                 }
                 let mut texs: Option<&Value> = None;
                 if !variant["m_Textures"].is_null() {
                     texs = Some(&variant["m_Textures"]);
                     for tex in variant["m_Textures"].as_array().expect("m_Textures is not an array").iter() {
-                        let descriptorrange = DescriptorRange::new(DescriptorRangeType::SRV, 1,Binding { space: 0, register: tex["m_BindPoint"].as_u64().unwrap() as u32 },curoffset);
+                        let mut count = 1;
+                        if tex["m_Name"].as_str().expect("m_Name is not a string") == "_BindlessTextures" {
+                            count = 2048;
+                        }
+                        let descriptorrange = DescriptorRange::new(DescriptorRangeType::SRV, count, Binding { space: 0, register: tex["m_BindPoint"].as_u64().unwrap() as u32 }, curoffset);
                         cbvsrvuavdescRanges.push(descriptorrange);
                         nametooffsetscbvsrvuav.insert(String::from(tex["m_Name"].as_str().expect("m_Name is not a string")), curoffset - srvBaseOffset);
-                        curoffset += 1;
+                        curoffset += count;
+                        let samplerBindPoint = tex["m_SamplerBindPoint"].as_i64().expect("m_SamplerBindPoint is not an integer").clone();
+                        if samplerBindPoint != -1 {
+                            let descriptorrange = DescriptorRange::new(DescriptorRangeType::Sampler, 1, Binding { space: 0, register: samplerBindPoint as u32 }, curoffset);
+                            samplerdescRanges.push(descriptorrange);
+                            curoffset += 1;
+                        }
                     }
                 }
                 if samplerdescRanges.len() > 0 {
                     rootparams.push(RootParameter::descriptor_table(ShaderVisibility::All, samplerdescRanges.as_slice()));
                 }
-                rootparams.push(RootParameter::descriptor_table(ShaderVisibility::All,cbvsrvuavdescRanges.as_slice()));
+                rootparams.push(RootParameter::descriptor_table(ShaderVisibility::All, cbvsrvuavdescRanges.as_slice()));
                 let rootSigDesc = D3D12_ROOT_SIGNATURE_DESC {
                     NumParameters: rootparams.len() as UINT,
                     pParameters: rootparams.as_ptr() as *const _,
@@ -528,9 +545,9 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                 };
                 let mut sig: *mut ID3DBlob = ptr::null_mut();
                 let mut err: *mut ID3DBlob = ptr::null_mut();
-                let hr = D3D12SerializeRootSignature(&rootSigDesc,D3D_ROOT_SIGNATURE_VERSION_1, &mut sig, &mut err);
+                let hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &mut sig, &mut err);
                 if hr != S_OK {
-                    panic!("Failed to serialize RootSignature {:#x}",hr);
+                    panic!("Failed to serialize RootSignature {:#x}", hr);
                 }
                 if err != ptr::null_mut() {
                     panic!("Serialization Error! {}", CStr::from_ptr(err.as_ref().unwrap().GetBufferPointer() as *const c_char).to_str().expect("Failed to convert to str"));
@@ -539,35 +556,33 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                     let _ = kernels.insert(Box::leak(Box::new(HashMap::new())));
                 }
 
-                let hr = device.create_root_signature(Blob::from_raw(sig),NodeMask::default());
+                let hr = device.create_root_signature(Blob::from_raw(sig), NodeMask::default());
                 if hr.0.is_null() {
-                    panic!("Failed to create root signature! {:#x}",hr.1);
+                    panic!("Failed to create root signature! {:#x}", hr.1);
                 }
                 let rootSig = hr.0;
-                let hr = device.create_compute_pipeline_state(&rootSig,Shader::from_raw(bytes.as_slice()),NodeMask::default(),CachedPSO::null(),PipelineStateFlags::empty());
+                println!("Kernel: {}", kernel["m_Name"].as_str().expect("m_Name is not a string"));
+                let hr = device.create_compute_pipeline_state(&rootSig, Shader::from_raw(bytes.as_slice()), NodeMask::default(), CachedPSO::null(), PipelineStateFlags::empty());
                 if hr.0.is_null() {
-                    panic!("Failed to create compute pipeline state! {:#x}",hr.1);
+                    panic!("Failed to create compute pipeline state! {:#x}", hr.1);
                 }
                 let pipestate = hr.0;
                 let mut nameOffsetDir = HashMap::<String, u32>::new();
-                let cbuf = &json_contents["m_Variants"][0]["m_ConstantBuffers"][variant["m_CbVariantIndices"][0].as_u64().unwrap() as usize];
+                let mut cbuf: &Value = &Value::Null;
+                if !variant["m_CbVariantIndices"][0].is_null() {
+                    cbuf = &json_contents["m_Variants"][0]["m_ConstantBuffers"][variant["m_CbVariantIndices"][0].as_u64().unwrap() as usize];
+                }
+                if !cbuf.is_null() {
                 for global in cbuf["m_Params"].as_array().expect("m_Params is not an array").iter() {
                     nameOffsetDir.insert(global["m_Name"].as_str().unwrap().to_string(), global["m_Offset"].as_u64().unwrap() as u32);
                 }
-                println!("Inserting {}",kernel["m_Name"].as_str().expect("m_Name is not a string"));
-                println!("Byte size: {}",cbuf["m_ByteSize"].as_u64().unwrap() as usize);
-                let remainder = (cbuf["m_ByteSize"].as_u64().unwrap()) % 256;
-                let mut finsize = 0u64;
-                if remainder == 0 {
-                    finsize = cbuf["m_ByteSize"].as_u64().unwrap();
-                } else {
-                    finsize = (cbuf["m_ByteSize"].as_u64().unwrap()) + 256 - remainder;
-                }
-                let mut desired_cbuf = Vec::<u8>::with_capacity(finsize as usize);
-                desired_cbuf.set_len(finsize as usize);
-                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(),desired_cbuf);
-                shadernametocbufoffsets.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(),nametooffsetscbvsrvuav);
-                kernels.as_mut().unwrap().insert(kernel["m_Name"].as_str().unwrap().to_string(), Box::leak(Box::new(kernel::kernel {
+                println!("Inserting {}", kernel["m_Name"].as_str().expect("m_Name is not a string"));
+                println!("Byte size: {}", cbuf["m_ByteSize"].as_u64().unwrap() as usize);
+                let mut desired_cbuf = vec![0;cbuf["m_ByteSize"].as_u64().unwrap() as usize];
+                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), desired_cbuf);
+                shadernametocbufoffsets.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), nametooffsetscbvsrvuav);
+            }
+            kernels.as_mut().unwrap().insert(kernel["m_Name"].as_str().unwrap().to_string(), Box::leak(Box::new(kernel::kernel {
                     rootSig: rootSig,
                     pso: pipestate,
                     textures: Some(HashMap::new()),
@@ -590,7 +605,11 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
 #[no_mangle]
 unsafe extern "C" fn SetBool(shader_name: *const c_char,param_name: *const c_char,val: c_int) {
     let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
-    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
+        println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
+        return;
+    }
     let offset = mappage[&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()];
     let value = val as u32;
     let value_bytes = value.to_le_bytes();
@@ -601,7 +620,11 @@ unsafe extern "C" fn SetBool(shader_name: *const c_char,param_name: *const c_cha
 #[no_mangle]
 unsafe extern "C" fn SetInt(shader_name: *const c_char,param_name: *const c_char,val: c_int) {
     let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
-    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
+        println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
+        return;
+    }
     let offset = mappage[&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()];
     let value = val as i32;
     let value_bytes = value.to_le_bytes();
@@ -612,7 +635,11 @@ unsafe extern "C" fn SetInt(shader_name: *const c_char,param_name: *const c_char
 #[no_mangle]
 unsafe extern "C" fn SetFloat(shader_name: *const c_char,param_name: *const c_char,val: c_float) {
     let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
-    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
+        println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
+        return;
+    }
     let offset = mappage[&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()];
     let value = val as f32;
     let value_bytes = value.to_le_bytes();
@@ -650,8 +677,13 @@ unsafe extern "C" fn SetBuffer(kernel_name: *const c_char,param_name: *const c_c
 }
 #[no_mangle]
 unsafe extern "C" fn SetVector(shader_name: *const c_char,param_name: *const c_char,x: c_float,y: c_float,z:c_float,e:c_float) {
+    println!("Set Vector! Param_name: {} Shader_name: {}",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
     let mut cbuf = shadernametocbuf.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert shader name to str")).unwrap();
-    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    let mut mappage = shadernametocbufoffsets.as_mut().unwrap().get_mut(CStr::from_ptr(shader_name).to_str().expect("Failed to convert param name to str")).unwrap();
+    if !mappage.contains_key(&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()) {
+        println!("{} doesn't exist on {}. Ignoring!",CStr::from_ptr(param_name).to_str().unwrap().to_string(),CStr::from_ptr(shader_name).to_str().unwrap().to_string());
+        return;
+    }
     let offset = mappage[&CStr::from_ptr(param_name).to_str().expect("Failed to convert param name to str").to_string()];
     let x_bytes = x.to_le_bytes();
     let y_bytes = y.to_le_bytes();
