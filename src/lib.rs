@@ -34,7 +34,7 @@ use winapi::um::d3dcommon::*;
 static mut globalinterfaces: Option<&'static mut UnityInterfaces> = None;
 static mut logger: Option<UnityLog> = None;
 //#[dynamic]
-static mut shadernametocbuf: Option<HashMap<String,(*mut u8,usize)>> = None;
+static mut shadernametocbuf: Option<HashMap<String,(*mut u8,u64)>> = None;
 static mut shadernametocbufoffsets: Option<HashMap<String,HashMap<String,u32>>> = None;
 static mut kernels: Option<&'static mut HashMap<String,&'static mut kernel::kernel<'static>>> = None;
 //#[dynamic]
@@ -577,7 +577,7 @@ unsafe extern "C" fn DX12ShadersInitialize(directory: *const c_char) {
                 println!("Inserting {}", kernel["m_Name"].as_str().expect("m_Name is not a string"));
                 println!("Byte size: {}", cbuf["m_ByteSize"].as_u64().unwrap() as usize);
                 let mut desired_cbuf = alloc(Layout::from_size_align(cbuf["m_ByteSize"].as_u64().unwrap() as usize,align_of::<u8>()).unwrap());
-                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), (desired_cbuf,cbuf["m_ByteSize"].as_u64().unwrap() as usize));
+                shadernametocbuf.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), (desired_cbuf,cbuf["m_ByteSize"].as_u64().unwrap()));
                 shadernametocbufoffsets.as_mut().unwrap().insert(json_contents["m_Name"].as_str().unwrap().to_string(), nametooffsetscbvsrvuav);
             }
             kernels.as_mut().unwrap().insert(kernel["m_Name"].as_str().unwrap().to_string(), Box::leak(Box::new(kernel::kernel {

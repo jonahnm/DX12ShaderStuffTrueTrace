@@ -27,7 +27,7 @@ pub struct kernel<'a> {
     pub buffers: HashMap<String, (Resource, u32, u32)>,
     pub offsetToUAVorSRV: HashMap<u32,bool>,
     pub nameToSRVUAVCBVtableOffset: &'a mut HashMap<String, u32>,
-    pub cbuffer: &'a (*mut u8,usize),
+    pub cbuffer: &'a (*mut u8,u64),
 }
 impl<'a> kernel<'a> {
     pub unsafe fn Dispatch(&self,cmdList: &GraphicsCommandList,states: &mut Vec<ResourceState>,x: u32,y: u32,z: u32,is_indirect: bool,indirect_argbuf: *mut c_void, indirect_argoff: u32) {
@@ -39,7 +39,7 @@ impl<'a> kernel<'a> {
         let mut constantBuffer = Resource::null();
         let cbDesc =  D3D12_RESOURCE_DESC {
             Dimension:  D3D12_RESOURCE_DIMENSION_BUFFER,
-            Width: self.cbuffer.1 as u64,
+            Width: self.cbuffer.1,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -75,14 +75,14 @@ impl<'a> kernel<'a> {
         if mappedData.0.is_null() {
             panic!("Failed to map constant buffer! {}",mappedData.1);
         }
-        ptr::copy_nonoverlapping(self.cbuffer.0,mappedData.0.cast(),self.cbuffer.1);
+        ptr::copy_nonoverlapping(self.cbuffer.0,mappedData.0.cast(),usize::try_from(self.cbuffer.1).unwrap());
         constantBuffer.unmap(0,Some(Range {
             start: 0,
             end: 0
         }));
         let cbv_desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: constantBuffer.gpu_virtual_address(),
-            SizeInBytes: self.cbuffer.1 as UINT,
+            SizeInBytes: u32::try_from(self.cbuffer.1).unwrap(),
         };
         let mut cpudesc = unityDescHeap.as_ref().expect("Unity Descriptor heap should exist at this point!").start_cpu_descriptor();
         let individualIncrement = device.get_descriptor_increment_size(DescriptorHeapType::CbvSrvUav);
